@@ -32,7 +32,7 @@ Note that your numbers may vary since quantization doesn't seem to be entirely d
 
 ## Setup
 
-You will need to perform these steps under whichever Python env you run KoboldAI with.
+You will need to perform these steps under whichever Python env you run your stuff with.
 
 1. Install CUDA quantized int4-fp16 matrix multiplication kernels: https://github.com/mstnegate/int4matmul_kernels
 
@@ -47,7 +47,7 @@ You will need to perform these steps under whichever Python env you run KoboldAI
             - Copy over the quantized weights (`pytorch_model.bin` by default) into that new folder.
             - Modify config.json: change `model_type` from `"opt"` to `"opt-sq-reduced"`, add the key-value pair `"quantization_bits" : 4`, and optionally, `"is_sparse" : true` if you sparsified.
     2. Use a pre-quantized model:
-        - LLaMA models pre-quantized with [qwopqwop200's excellent GPT repo](https://github.com/qwopqwop200/GPTQ-for-LLaMa) are incompatible without slight manual work due to some bad naming decisions on my part. These include the decapoda-research ones. There is a compatibility layer, but you need to some setup:
+        - LLaMA models pre-quantized with [qwopqwop200's excellent GPTQ repo](https://github.com/qwopqwop200/GPTQ-for-LLaMa) are incompatible without slight manual work due to some bad naming decisions on my part. These include the decapoda-research ones. There is a compatibility layer, but you need to some setup:
             - YMMV with this method; I didn't prepare those weights.
             - Create a folder with appropriate config files (config.json, generation_config.json, etc., etc.)
             - Copy the quantized weights file (probably `something.pt`) into this folder and rename it to `pytorch_model.bin`.
