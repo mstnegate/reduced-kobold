@@ -5,10 +5,11 @@ import random
 
 import numpy as np
 import torch
-import transformers
 
 import layers
 from layers import unquantize, quantize, fake_quantize, MAX_QUANTIZATION_VALUE
+
+import models
 
 ################################################################################
 # general config stuff
@@ -17,6 +18,7 @@ from layers import unquantize, quantize, fake_quantize, MAX_QUANTIZATION_VALUE
 PERFORM_QUANTIZATION = True
 PERFORM_SPARSIFICATION = True
 LOAD_FILE_PATH = "/pth/to/your/model/folder"
+MODEL_TYPE = "your-model-type" # either "opt" or "llama"
 LOAD_MODEL_IS_SHARDED = False
 
 # stuff you probably don't need to change
@@ -113,7 +115,7 @@ def gptq_quantization(H, W, sparsify=False):
     lambda_ = H.diagonal().mean(axis=0) * lambda_factor
     diag_idxes = list(range(H.shape[-1]))
 
-    # TODO: group quantization
+    # TODO: block-quantization option
 
     attempts = 0
     while True:
@@ -226,7 +228,7 @@ else:
 ################################################################################
 
 # TODO: remove cuda:0 assumption
-def quantize_opt_layer(arg_stack, attn_mask, layer, layer_key, outpath=None):
+def quantize_opt_layer(arg_stack, attn_mask, layer, layer_key, conv_model=None):
     layer.to("cuda:0")
 
     def capture_layer_input(module):
@@ -293,9 +295,11 @@ def quantize_opt_layer(arg_stack, attn_mask, layer, layer_key, outpath=None):
             replacement_layer = layer
         else:
             if PERFORM_SPARSIFICATION:
-                replacement_layer = layers.Linear_SparseInt4(layer.in_features, layer.out_features)
+                replacement_layer = layers.Linear_SparseInt4(
+                    layer.in_features, layer.out_features, bias=conv_model.HAS_BIAS)
             else:
-                replacement_layer = layers.Linear_Int4(layer.in_features, layer.out_features)
+                replacement_layer = layers.Linear_Int4(
+                    layer.in_features, layer.out_features, bias=conv_model.HAS_BIAS)
 
             replacement_layer.construct(zeros, scales, layer.bias, weights, mask)
 
@@ -303,8 +307,13 @@ def quantize_opt_layer(arg_stack, attn_mask, layer, layer_key, outpath=None):
             del layer.bias
             del layer
 
-        if outpath is not None:
-            conv_model.write(replacement_layer, "%d.%s" % (layer_key, module_key))
+        if conv_model is not None:
+            conv_model.write(
+                replacement_layer,
+                "%d.%s" % (layer_key, module_key),
+                PERFORM_SPARSIFICATION,
+                ONLY_FAKE_QUANTIZE
+            )
 
         del zeros
         del scales
@@ -316,15 +325,7 @@ def quantize_opt_layer(arg_stack, attn_mask, layer, layer_key, outpath=None):
         return replacement_layer
 
 
-    # TODO: lift this later for more generic handling
-    quantization_targets = [
-        "fc1",
-        "fc2",
-        "self_attn.k_proj",
-        "self_attn.v_proj",
-        "self_attn.q_proj",
-        "self_attn.out_proj",
-    ]
+    quantization_targets = conv_model.QUANTIZATION_NODES
     module_accessors = {}
     leaf_targets = {}
 
@@ -377,199 +378,6 @@ def quantize_opt_layer(arg_stack, attn_mask, layer, layer_key, outpath=None):
     gc.collect()
 
     return final_states
-
-
-################################################################################
-
-class OPTModelWrapper:
-    def __init__(self, fld):
-        super().__init__()
-
-        self.base_path = fld
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(self.base_path)
-        self.prefix = "model."
-
-    def embed(self, tokens):
-        # TODO: cleaner way to embed tokens
-
-        if self._pos_embedder is None:
-            self.load_embedder()
-
-        token_embeds = (self._token_embedder)(tokens)
-
-        attn_mask = torch.ones(
-            token_embeds.shape[:2],
-            dtype=torch.bool,
-            device=token_embeds.device
-        )
-        pos_embeds = (self._pos_embedder)(attn_mask, 0)
-
-        from transformers.models.opt.modeling_opt import OPTDecoder
-        attn_mask = OPTDecoder._prepare_decoder_attention_mask(
-            None, attn_mask, (CALIBRATION_BATCH_SIZE, tokens.shape[1]), token_embeds, 0
-        )
-
-        return token_embeds + pos_embeds, attn_mask.to("cuda:0")
-
-
-class MemoryOPTModelWrapper(OPTModelWrapper):
-    # loads in a full model in one shot; thin wrapper around HF
-
-    def __init__(self, fld):
-        super().__init__(fld)
-
-        self.model = transformers.AutoModelForCausalLM.from_pretrained(
-            fld, torch_dtype=torch.float16)
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(fld)
-        self._token_embedder = self.model.model.decoder.embed_tokens
-        self._pos_embedder = self.model.model.decoder.embed_positions
-
-    def decoder_layers(self):
-        for layer in self.model.model.decoder.layers:
-            yield layer
-
-    def write(self, layer, pth):
-        pass # no-op; we store everything in self.model
-
-    def finalize_items(self):
-        pass # no-op again; everything is in self.model
-
-    @property
-    def save_container(self):
-        # force clone to prevent view-saving; might be possible to disable this
-        return {k:v.clone() for k,v in self.model.state_dict().items()}
-
-
-class ShardedOPTModelWrapper(OPTModelWrapper):
-    # loads in a sharded model one layer at a time, disposing after each layer
-
-    class FakeOPTConfig:
-        def __init__(self, dct):
-            super().__init__()
-            self._dct = dct
-        def __getattr__(self, k):
-            return self._dct[k]
-
-    def __init__(self, fld):
-        super().__init__(fld)
-
-        with open(os.path.join(self.base_path, "pytorch_model.bin.index.json"), "rb") as f:
-            self.map = json.load(f)
-        with open(os.path.join(self.base_path, "config.json"), "rb") as f:
-            self.model_conf = json.load(f)
-
-        self.fake_model_conf = ShardedOPTModelWrapper.FakeOPTConfig(self.model_conf)
-        self._pos_embedder = None
-        self._token_embedder = None
-        self.dont_save_these_keys = set()
-
-        self.save_container = {}
-
-    def load_embedder(self):
-        from transformers.models.opt.modeling_opt import OPTLearnedPositionalEmbedding
-        self._pos_embedder = OPTLearnedPositionalEmbedding(
-            self.model_conf["max_position_embeddings"],
-            self.model_conf["hidden_size"],
-        )
-        self._token_embedder = torch.nn.Embedding(
-            self.model_conf["vocab_size"],
-            self.model_conf["word_embed_proj_dim"],
-            self.model_conf["pad_token_id"]
-        )
-
-        ep_w = self.map["weight_map"]["%sdecoder.embed_positions.weight" % self.prefix]
-        et_w = self.map["weight_map"]["%sdecoder.embed_tokens.weight" % self.prefix]
-
-        ep_wts = torch.load(os.path.join(self.base_path, ep_w))
-        if (et_w == ep_w):
-            et_wts = ep_wts
-        else:
-            et_wts = torch.load(os.path.join(self.base_path, et_w))
-
-        self._pos_embedder.weight.data = ep_wts["%sdecoder.embed_positions.weight" % self.prefix]
-        self._token_embedder.weight.data = et_wts["%sdecoder.embed_tokens.weight" % self.prefix]
-
-    def decoder_layers(self):
-        from transformers.models.opt.modeling_opt import OPTDecoderLayer
-
-        # idea: generate each layer as needed ex-nihilo then delete it once used
-        n_layers = self.model_conf["num_hidden_layers"]
-
-        for i in range(n_layers):
-            prefix = "%sdecoder.layers.%d." % (self.prefix, i)
-            containers = {}
-            params_to_path = {}
-
-            for k,v in self.map["weight_map"].items():
-                if not k.startswith(prefix):
-                    continue
-
-                if v not in containers:
-                    containers[v] = torch.load(os.path.join(self.base_path, v))
-
-                params_to_path[k] = v # store for convenience since we're already here
-
-            # and now construct the decoding layer
-            decode_layer = OPTDecoderLayer(self.fake_model_conf)
-            for k, v in params_to_path.items():
-                root, *path, leaf = k[len(prefix):].split(".")
-
-                dig = getattr(decode_layer, root)
-                for part in path:
-                    dig = getattr(dig, part)
-
-                if isinstance(getattr(dig, leaf), torch.nn.Parameter):
-                    # slightly non-standard assign since you need to do param.data
-                    dig = getattr(dig, leaf)
-                    dig.data = containers[v][k].clone()
-                else:
-                    setattr(dig, leaf, containers[v][k].clone())
-
-            yield decode_layer
-
-            del decode_layer
-
-            memo_keys = list(containers.keys())
-            for k in memo_keys:
-                del containers[k]
-            del containers
-
-    def finalize_items(self):
-        # everything that we didn't get before, we're going to load now
-        already_hit = set(self.save_container.keys())
-        containers = {}
-        for k,v in self.map["weight_map"].items():
-            if k in already_hit:
-                continue
-
-            if k in self.dont_save_these_keys:
-                continue
-
-            if v not in containers:
-                containers[v] = torch.load(os.path.join(self.base_path, v))
-
-            self.save_container[k] = containers[v][k].to("cpu")
-
-        memo_keys = list(containers.keys())
-        for k in memo_keys:
-            del containers[k]
-        del containers
-
-    def write(self, layer, pth):
-        pth = "%sdecoder.layers.%s" % (self.prefix, pth)
-
-        self.save_container["%s.bias" % pth] = layer.bias.data.to("cpu").clone()
-        if not ONLY_FAKE_QUANTIZE:
-            self.save_container["%s.quantized_weights" % pth] = layer.quantized_weights.data.to("cpu").clone()
-            if PERFORM_SPARSIFICATION:
-                self.save_container["%s.quantized_mask" % pth] = layer.quantized_mask.data.to("cpu").clone()
-
-            self.dont_save_these_keys.add("%s.weight" % pth)
-            self.save_container["%s.zeros" % pth] = layer.zeros.data.to("cpu").clone()
-            self.save_container["%s.scales" % pth] = layer.scales.data.to("cpu").clone()
-        else:
-            self.save_container["%s.weight" % pth] = layer.weight.data.to("cpu").clone()
-
 
 ################################################################################
 
@@ -625,7 +433,7 @@ def prepare_calibration_data(fsettings, n_samples, conv_model):
 
     arg_stack = []
     for i in range(0, n_samples, CALIBRATION_BATCH_SIZE):
-        val, mask = conv_model.embed(iten[i:(i+CALIBRATION_BATCH_SIZE), ...])
+        val, mask = conv_model.embed(iten[i:(i+CALIBRATION_BATCH_SIZE), ...], batch_size=CALIBRATION_BATCH_SIZE)
 
         arg_stack.append(val)
 
@@ -642,10 +450,7 @@ if __name__ == "__main__":
         np.random.seed(CALIBRATION_DATA_SEED)
         torch.manual_seed(CALIBRATION_DATA_SEED)
 
-    if LOAD_MODEL_IS_SHARDED:
-        conv_model = ShardedOPTModelWrapper(LOAD_FILE_PATH)
-    else:
-        conv_model = MemoryOPTModelWrapper(LOAD_FILE_PATH)
+    conv_model = models.get_loader(MODEL_TYPE, LOAD_MODEL_IS_SHARDED)(LOAD_FILE_PATH)
 
     arg_stack, attn_mask = prepare_calibration_data(
         CALIBRATION_DATA_SETTINGS,
@@ -658,7 +463,7 @@ if __name__ == "__main__":
     for i,layer in enumerate(conv_model.decoder_layers()):
         print("Running on layer %d" % i)
         with torch.no_grad():
-            new_states = quantize_opt_layer(states, attn_mask, layer, i, outpath=conv_model)
+            new_states = quantize_opt_layer(states, attn_mask, layer, i, conv_model=conv_model)
 
         # clear memory very very thoroughly; any sort of leak = bad
         for a in states:

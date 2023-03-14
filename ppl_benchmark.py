@@ -57,5 +57,9 @@ def ppl_calc(model, tokenizer, dataset):
 
 if __name__ == "__main__":
     dataset = load_data()
+    import time
+
     model, tokenizer = load_model_and_tokenizer(MODEL_TO_EVALUATE)
+    t = time.time()
     ppl_calc(model, tokenizer, dataset)
+    print("Time taken: %.5f" % (time.time() - t))

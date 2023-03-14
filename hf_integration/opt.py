@@ -12,8 +12,11 @@ class SQReducedOptConfig(transformers.OPTConfig):
         self.quantization_bits = quantization_bits
         self.is_sparse = is_sparse
 
-class SQReducedKOPTForCausalLM(transformers.OPTForCausalLM):
+class SQReducedOPTForCausalLM(transformers.OPTForCausalLM):
     config_class = SQReducedOptConfig
+
+    def _dummy_mask_func(self, attention_mask, input_shape, inputs_embeds, past_key_values_length):
+        return torch.ones((1,), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
 
     def __init__(self, config):
         super().__init__(config)
@@ -55,4 +58,4 @@ class SQReducedKOPTForCausalLM(transformers.OPTForCausalLM):
 
 def register():
     transformers.AutoConfig.register(MODEL_TYPE_KEY, SQReducedOptConfig)
-    transformers.AutoModelForCausalLM.register(SQReducedOptConfig, SQReducedKOPTForCausalLM)
+    transformers.AutoModelForCausalLM.register(SQReducedOptConfig, SQReducedOPTForCausalLM)

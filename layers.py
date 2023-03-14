@@ -27,7 +27,13 @@ def fake_quantize(block, zeros, scales):
 
 # TODO: remove the cuda:0 assumption
 class Linear_Int4(torch.nn.Module):
-    def __init__(self, in_features, out_features, weight_packing_factor=8):
+    # HACK: older GPTQ quantizations used "qweight" for the weight tensor and
+    #       i chose my name before i knew about that; we'll switch this in a
+    #       subclass to provide compatibility;
+    #       we only need to support it here since those models were never sparsified
+    WEIGHT_KEY = "quantized_weights"
+
+    def __init__(self, in_features, out_features, weight_packing_factor=8, bias=True):
         super().__init__()
 
         self.in_features = in_features
@@ -37,19 +43,27 @@ class Linear_Int4(torch.nn.Module):
         # and autograd; no plans currently to try and support quantized training
         self.register_buffer("zeros", torch.zeros(out_features, dtype=torch.float16))
         self.register_buffer("scales", torch.zeros(out_features, dtype=torch.float16))
-        self.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
+        if bias:
+            self.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
+        else:
+            self.register_buffer("bias", None)
+
         # *don't* call this weights just in case some code gets confused and
         #  thinks we're a legitimate linear layer
         # also note that the weights are stored pre-transposed for convenience
         self.register_buffer(
-            "quantized_weights",
+            self.WEIGHT_KEY,
             torch.zeros(in_features // weight_packing_factor, out_features, dtype=torch.int)
         )
 
     def construct(self, zeros, scales, bias, fake_q_weights, mask=None):
+        # we don't need to construct into the older format
+        assert self.WEIGHT_KEY == "quantized_weights"
+
         self.zeros = zeros.clone().to(torch.float16).contiguous()
         self.scales = scales.clone().to(torch.float16).contiguous()
-        self.bias = bias.clone().to(torch.float16).contiguous()
+        if self.bias is not None:
+            self.bias = bias.clone().to(torch.float16).contiguous()
 
         fake_q_weights = quantize(fake_q_weights, self.zeros[:, None], self.scales[:, None]).to(torch.int).T
 
@@ -73,22 +87,23 @@ class Linear_Int4(torch.nn.Module):
         # TODO: CPU forward pass (probably not enabled by default though)
 
         if len(x.shape) == 3:
-            shape = (x.shape[0], x.shape[1], self.quantized_weights.shape[1])
+            shape = (x.shape[0], x.shape[1], self.out_features)
         elif len(x.shape) == 2:
             # force batch axis to keep kernel coordinates consistent
-            shape = (1, x.shape[0], self.quantized_weights.shape[1])
+            shape = (1, x.shape[0], self.out_features)
 
         with torch.no_grad():
             outs = torch.zeros(shape, dtype=x.dtype, device=x.device)
 
             int4matmul.quant_int4_linear_mult(
-                outs, self.quantized_weights,
+                outs, getattr(self, self.WEIGHT_KEY),
                 x if len(x.shape) == 3 else x.view(1, *x.shape),
                 self.scales,
                 self.zeros,
                 getattr(self, "quantized_mask", None)
             )
-            outs += self.bias.view((1,1,len(self.bias)))
+            if self.bias is not None:
+                outs += self.bias.view((1,1,len(self.bias)))
 
             # match shape going out
             if len(x.shape) == 3:
@@ -97,9 +112,13 @@ class Linear_Int4(torch.nn.Module):
                 return outs.view((outs.shape[1], outs.shape[2]))
 
 
+class CompatLinear_Int4(Linear_Int4):
+    WEIGHT_KEY = "qweight"
+
+
 class Linear_SparseInt4(Linear_Int4):
-    def __init__(self, in_features, out_features):
-        super().__init__(in_features, out_features, weight_packing_factor=16)
+    def __init__(self, in_features, out_features, bias=True):
+        super().__init__(in_features, out_features, weight_packing_factor=16, bias=bias)
 
         self.register_buffer(
             "quantized_mask",
@@ -109,7 +128,8 @@ class Linear_SparseInt4(Linear_Int4):
     def construct(self, zeros, scales, bias, fake_q_weights, mask):
         self.zeros = zeros.clone().to(torch.float16).contiguous()
         self.scales = scales.clone().to(torch.float16).contiguous()
-        self.bias = bias.clone().to(torch.float16).contiguous()
+        if self.bias is not None:
+            self.bias = bias.clone().to(torch.float16).contiguous()
 
         # don't transpose
         fake_q_weights = quantize(fake_q_weights, self.zeros[:, None], self.scales[:, None]).to(torch.uint8)
