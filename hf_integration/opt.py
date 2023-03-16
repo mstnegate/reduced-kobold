@@ -15,9 +15,6 @@ class SQReducedOptConfig(transformers.OPTConfig):
 class SQReducedOPTForCausalLM(transformers.OPTForCausalLM):
     config_class = SQReducedOptConfig
 
-    def _dummy_mask_func(self, attention_mask, input_shape, inputs_embeds, past_key_values_length):
-        return torch.ones((1,), dtype=inputs_embeds.dtype, device=inputs_embeds.device)
-
     def __init__(self, config):
         super().__init__(config)
 
