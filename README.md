@@ -1,6 +1,6 @@
 # reduced-kobold
 
-This repo contains an implementation of GPTQ[^1] + SparseGPT[^2] with some [hacky] integration with KoboldAI. Theoretically it should work with most stuff that uses HF transformers, but I only tested with Kobold.
+This repo contains an implementation of GPTQ[^1] + SparseGPT[^2] with some [hacky] integration with KoboldAI and oobabooga's UI. Theoretically it should work with most stuff that uses HF transformers; I've just only tested with those.
 
 Note that I am neither associated with these papers nor their authors.
 
