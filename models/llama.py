@@ -5,7 +5,7 @@ import transformers
 
 from .base import SQBaseModelWrapper, SQShardedMixin
 
-class LLaMAModelWrapper(SQBaseModelWrapper):
+class LlamaModelWrapper(SQBaseModelWrapper):
     QUANTIZATION_NODES = [
         "self_attn.k_proj",
         "self_attn.v_proj",
@@ -33,21 +33,21 @@ class LLaMAModelWrapper(SQBaseModelWrapper):
             dtype=torch.bool,
             device=token_embeds.device
         )
-        from transformers.models.llama.modeling_llama import LLaMAModel
-        attn_mask = LLaMAModel._prepare_decoder_attention_mask(
+        from transformers.models.llama.modeling_llama import LlamaModel
+        attn_mask = LlamaModel._prepare_decoder_attention_mask(
             None, attn_mask, (batch_size, tokens.shape[1]), token_embeds, 0
         )
 
         return token_embeds, attn_mask.to("cuda:0")
 
-class MemoryLLaMAModelWrapper(LLaMAModelWrapper):
+class MemoryLlamaModelWrapper(LlamaModelWrapper):
     def __init__(self, fld):
         # just shard the model; there aren't models small enough to make
         # this worthwhile
         raise NotImplementedError
 
-class ShardedLLaMAModelWrapper(LLaMAModelWrapper, SQShardedMixin):
-    class FakeLLaMAConfig:
+class ShardedLlamaModelWrapper(LlamaModelWrapper, SQShardedMixin):
+    class FakeLlamaConfig:
         def __init__(self, dct):
             super().__init__()
             self._dct = dct
@@ -59,7 +59,7 @@ class ShardedLLaMAModelWrapper(LLaMAModelWrapper, SQShardedMixin):
 
         self.setup_sharding()
 
-        self.fake_model_conf = ShardedLLaMAModelWrapper.FakeLLaMAConfig(self.model_conf)
+        self.fake_model_conf = ShardedLlamaModelWrapper.FakeLlamaConfig(self.model_conf)
         self._token_embedder = None
 
     def load_embedder(self):
@@ -72,14 +72,14 @@ class ShardedLLaMAModelWrapper(LLaMAModelWrapper, SQShardedMixin):
         self.flush_loaded()
 
     def decoder_layers(self):
-        from transformers.models.llama.modeling_llama import LLaMADecoderLayer
+        from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
         n_layers = self.model_conf["num_hidden_layers"]
 
         for i in range(n_layers):
             prefix = "%slayers.%d." % (self.prefix, i)
 
-            decode_layer = LLaMADecoderLayer(self.fake_model_conf)
+            decode_layer = LlamaDecoderLayer(self.fake_model_conf)
             for k, v in self.get_weights_with_prefix(prefix).items():
                 root, *path, leaf = k[len(prefix):].split(".")
 

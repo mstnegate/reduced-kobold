@@ -1,11 +1,11 @@
 import torch
 import transformers
-from transformers import LLaMAConfig, LLaMAForCausalLM
+from transformers import LlamaConfig, LlamaForCausalLM
 import layers
 
 LLAMA_MODEL_TYPE_KEY = "llama-sq-reduced"
 
-class SQReducedLLaMAConfig(LLaMAConfig):
+class SQReducedLlamaConfig(LlamaConfig):
     model_type = LLAMA_MODEL_TYPE_KEY
     def __init__(self, quantization_bits=4, is_sparse=False, qwopqwop_mode=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -14,8 +14,8 @@ class SQReducedLLaMAConfig(LLaMAConfig):
         self.qwopqwop_mode = qwopqwop_mode
         self.is_sparse = is_sparse
 
-class SQReducedLLaMAForCausalLM(LLaMAForCausalLM):
-    config_class = SQReducedLLaMAConfig
+class SQReducedLlamaForCausalLM(LlamaForCausalLM):
+    config_class = SQReducedLlamaConfig
 
     def __init__(self, config):
         super().__init__(config)
@@ -58,5 +58,5 @@ class SQReducedLLaMAForCausalLM(LLaMAForCausalLM):
 
 
 def register():
-    transformers.AutoConfig.register(LLAMA_MODEL_TYPE_KEY, SQReducedLLaMAConfig)
-    transformers.AutoModelForCausalLM.register(SQReducedLLaMAConfig, SQReducedLLaMAForCausalLM)
+    transformers.AutoConfig.register(LLAMA_MODEL_TYPE_KEY, SQReducedLlamaConfig)
+    transformers.AutoModelForCausalLM.register(SQReducedLlamaConfig, SQReducedLlamaForCausalLM)

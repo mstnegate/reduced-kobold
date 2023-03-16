@@ -14,11 +14,11 @@ Results are separated by base model I've tested. Note that your numbers may vary
 
 ### LLaMA
 
-| Bits | Sparsity |  7B  |
-| :--: | :------: | :--: |
-|  16  |   100%   |  OOM |
-|   4  |   100%   | 6.83 |
-|   4  |  16:32   | 9.53 |
+| Bits | Sparsity |  7B  |  13B |
+| :--: | :------: | :--: | :--: |
+|  16  |   100%   |  OOM |  OOM |
+|   4  |   100%   | 6.83 |  OOM |
+|   4  |  16:32   | 9.53 | 6.78 |
 
 ### Pythia
 
