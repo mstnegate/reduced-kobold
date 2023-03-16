@@ -15,6 +15,7 @@ class SQBaseModelWrapper:
         with open(os.path.join(self.base_path, "config.json"), "rb") as f:
             self.model_conf = json.load(f)
 
+AUTODISPOSE_THRESHOLD = 4
 class SQShardedMixin:
     def setup_sharding(self):
         # mildly inelegant way of avoiding deadly diamond of deaths in __init__
@@ -27,8 +28,11 @@ class SQShardedMixin:
 
         self.save_container = {}
 
-    def _get_container(self, k):
+    def _get_container(self, k, autodispose=False):
         if k not in self._loaded_containers:
+            if len(self._loaded_containers) > AUTODISPOSE_THRESHOLD:
+                self.flush_loaded()
+
             self._loaded_containers[k] = torch.load(os.path.join(self.base_path, k))
 
         return self._loaded_containers[k]
@@ -43,13 +47,13 @@ class SQShardedMixin:
 
         return params_to_path
 
-    def fetch_weights(self, k):
+    def fetch_weights(self, k, autodispose=False):
         if k not in self.map["weight_map"]:
             raise KeyError("Attempted to fetch unknown weight tensor %r" % k)
 
         k_file = self.map["weight_map"][k]
 
-        container = self._get_container(k_file)
+        container = self._get_container(k_file, autodispose=autodispose)
         return container[k]
 
     def flush_loaded(self):

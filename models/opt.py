@@ -146,7 +146,7 @@ class ShardedOPTModelWrapper(OPTModelWrapper, SQShardedMixin):
             if k in self.dont_save_these_keys:
                 continue
 
-            self.save_container[k] = self.fetch_weights(k)
+            self.save_container[k] = self.fetch_weights(k, autodispose=True)
 
         self.flush_loaded()
 

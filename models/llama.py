@@ -102,7 +102,6 @@ class ShardedLLaMAModelWrapper(LLaMAModelWrapper, SQShardedMixin):
 
     def finalize_items(self):
         already_hit = set(self.save_container.keys())
-        containers = {}
         for k,v in self.map["weight_map"].items():
             if k in already_hit:
                 continue
@@ -110,10 +109,7 @@ class ShardedLLaMAModelWrapper(LLaMAModelWrapper, SQShardedMixin):
             if k in self.dont_save_these_keys:
                 continue
 
-            if v not in containers:
-                containers[v] = torch.load(os.path.join(self.base_path, v))
-
-            self.save_container[k] = self.fetch_weights(k)
+            self.save_container[k] = self.fetch_weights(k, autodispose=True)
 
         self.flush_loaded()
 
