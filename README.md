@@ -10,9 +10,10 @@ Note that sparsification is currently experimental. Benchmark results loosely fo
 
 ## Supported Models/Configurations
 
-This repo supports OPT-based models without project in/out layers; I've tested for 125M, 2.7B, 6.7B, and 13B.
-
-It has also experimental support for LLaMA models. I've only tested for 7B currently. Note that you will need to install a non-standard version of transformers.
+Supported models:
+* OPT models without project in/out layers; tested for 125M, 2.7B, 6.7B, 13B
+* LLaMA (experimental); tested for 7B
+* GPT-NeoX/Pythia; tested for Pythia 350M/1.3B
 
 Support for other base models is planned.
 
@@ -20,15 +21,7 @@ This repo only contains [accelerated] support for GPTQ int4 and GPTQ int4 + 16:3
 
 ## Benchmarks
 
-Unscientific benchmark perplexities are below for WikiText2. This follows the methodology described in the GPTQ and SparseGPT papers.
-
-| Bits | Sparsity | OPT-125M | OPT-2.7B | LLaMA-7B |
-| :--: | :------: | :------: | :------: | :------: |
-|  16  |   100%   |   27.66  |   12.46  |    OOM   |
-|   4  |   100%   |   31.13  |   13.16  |   6.83   |
-|   4  |  16:32   |   40.97  |   14.61  |   9.53   |
-
-Note that your numbers may vary since quantization doesn't seem to be entirely deterministic (somehow.) Also, PPL seems to be very sensitive to the quality of calibration data as well. YMMV.
+Perplexity benchmarks can be [found under benchmarks.md](benchmarks.md).
 
 ## Setup
 

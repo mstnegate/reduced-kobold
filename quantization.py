@@ -18,7 +18,7 @@ import models
 PERFORM_QUANTIZATION = True
 PERFORM_SPARSIFICATION = True
 LOAD_FILE_PATH = "/pth/to/your/model/folder"
-MODEL_TYPE = "your-model-type" # either "opt" or "llama"
+MODEL_TYPE = "your-model-type" # "opt", "llama", "gpt_neox"
 LOAD_MODEL_IS_SHARDED = False
 
 # stuff you probably don't need to change
