@@ -4,7 +4,7 @@ This repo contains an implementation of GPTQ[^1] + SparseGPT[^2] with some [hack
 
 Note that I am neither associated with these papers nor their authors.
 
-The code supports int4 quantization via GPTQ, with optional 16:32 joint sparsification. Group quantization is currently not supported.
+The code supports int4 quantization via GPTQ, with optional 16:32 joint sparsification. Group quantization is supported.
 
 Note that sparsification is currently experimental. Benchmark results loosely follow the paper's claims but actual generation can be tempermental. I haven't ran these enough to comment on output quality relative to lower param count dense models. Hopefully my code is just bugged!
 
@@ -12,7 +12,7 @@ Note that sparsification is currently experimental. Benchmark results loosely fo
 
 Supported models:
 * OPT models without project in/out layers; tested for 125M, 2.7B, 6.7B, 13B
-* LLaMA (experimental); tested for 7B
+* LLaMA (experimental); tested for 7B, 13B
 * GPT-NeoX/Pythia; tested for Pythia 350M/1.3B
 
 Support for other base models is planned.
@@ -38,7 +38,7 @@ You will need to perform these steps under whichever Python env you run your stu
         - This only outputs a set of quantized tensors; you have to manually set up the model for usage with HF.
             - Copy everything in the source directory of your model (except for the weights) and create a new folder for your quantized model.
             - Copy over the quantized weights (`pytorch_model.bin` by default) into that new folder.
-            - Modify config.json: change `model_type` from `"opt"` to `"opt-sq-reduced"`, add the key-value pair `"quantization_bits" : 4`, and optionally, `"is_sparse" : true` if you sparsified.
+            - Modify config.json: change `model_type` from `"opt"` to `"opt-sq-reduced"`, add the key-value pair `"quantization_bits" : 4`, and optionally, `"is_sparse" : true` if you sparsified. If you set up group quantization, add a key-value pair `"quantization_group_size"` for whatever size you picked.
     2. Use a pre-quantized model:
         - LLaMA models pre-quantized with [qwopqwop200's excellent GPTQ repo](https://github.com/qwopqwop200/GPTQ-for-LLaMa) are incompatible without slight manual work due to some bad naming decisions on my part. These include the decapoda-research ones. There is a compatibility layer, but you need to some setup:
             - YMMV with this method; I didn't prepare those weights.

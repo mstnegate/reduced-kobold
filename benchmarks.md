@@ -4,6 +4,8 @@ Unscientific benchmark perplexities are below for WikiText2. This follows the me
 
 Results are separated by base model I've tested. Note that your numbers may vary since quantization doesn't seem to be entirely deterministic (somehow.) Also, PPL seems to be very sensitive to the quality of calibration data as well. YMMV.
 
+Note that the below benchmarks were current as-of 3c1c616, and predate some of the new quantization options.
+
 ### OPT
 
 | Bits | Sparsity |  125M |  2.7B |

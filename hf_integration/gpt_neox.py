@@ -26,6 +26,10 @@ class SQReducedGPTNeoXForCausalLM(transformers.GPTNeoXForCausalLM):
         if quantization != 4:
             raise ValueError("Only 4-bit quantization supported currently")
 
+        group_size = getattr(config, "quantization_group_size", -1)
+
+        kwargs = dict(quantization_bits=quantization, group_size=group_size)
+
         # evil hacky code below this point
         d = self.gpt_neox
 
@@ -39,13 +43,13 @@ class SQReducedGPTNeoXForCausalLM(transformers.GPTNeoXForCausalLM):
             proj_mtxes = ["query_key_value", "dense"]
             for proj_mtx_name in proj_mtxes:
                 lin_lay = getattr(attn, proj_mtx_name)
-                setattr(attn, proj_mtx_name, layer_cls(lin_lay.in_features, lin_lay.out_features))
+                setattr(attn, proj_mtx_name, layer_cls(lin_lay.in_features, lin_lay.out_features, **kwargs))
 
             mlp = layer.mlp
             proj_mtxes = ["dense_4h_to_h", "dense_h_to_4h"]
             for proj_mtx_name in proj_mtxes:
                 lin_lay = getattr(mlp, proj_mtx_name)
-                setattr(mlp, proj_mtx_name, layer_cls(lin_lay.in_features, lin_lay.out_features))
+                setattr(mlp, proj_mtx_name, layer_cls(lin_lay.in_features, lin_lay.out_features, **kwargs))
 
 def register():
     transformers.AutoConfig.register(MODEL_TYPE_KEY, SQReducedGPTNeoXConfig)

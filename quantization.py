@@ -7,8 +7,7 @@ import numpy as np
 import torch
 
 import layers
-from layers import unquantize, quantize, fake_quantize, MAX_QUANTIZATION_VALUE
-
+import quantizers
 import models
 
 ################################################################################
@@ -17,9 +16,13 @@ import models
 # stuff you will probably want to change
 PERFORM_QUANTIZATION = True
 PERFORM_SPARSIFICATION = True
+GROUP_QUANTIZATION_SIZE = 128 # disable with -1 or None (either works)
+QUANTIZATION_METHOD = "zero-point" # see quantizers.py for options
+
 LOAD_FILE_PATH = "/pth/to/your/model/folder"
 MODEL_TYPE = "your-model-type" # "opt", "llama", "gpt_neox"
-LOAD_MODEL_IS_SHARDED = False
+LOAD_MODEL_IS_SHARDED = True
+
 
 # stuff you probably don't need to change
 N_SAMPLES = 128
@@ -44,18 +47,34 @@ CALIBRATION_DATA_SETTINGS = dict(
 
 SAVE_FILE_PATH = "pytorch_model.bin"
 
+# experimental options
+# quantizes on a per-layer instead of decode-unit level when passing data in;
+# turning it on increases runtime and should theoretically improve accuracy
+# (it didn't for me though)
+PERFORM_STAGED_CALIBRATION = True
+# makes a best guess at sparsifying a group quantization bucket before
+# calculating quantization params; theoretically improves accuracy for if it
+# predicts well and worsens it if it doesn't; experimental
+# set to 0 to disable
+GUESS_SPARSE_PERCENTAGE = 0.5
+# based off actorder from reference GPTQ impl; this rearranges quantization
+# to happen in descending activation magnitude; only recommend using this for
+# mostly-unstructured configurations (no group quantization, no sparsity)
+PERFORM_ACTIVATION_SORTING = True
+
 # more technical stuff with gptq/sparsegpt; don't change these unless you
 # know what you're doing
 GPTQ_BLOCK_SIZE = 128           # suggested by gptq paper on p5
 SPARSEGPT_BLOCK_SPARSITY = 32   # keep at 32 unless benchmarking fp16 sparse
-GPTQ_LAMBDA_FACTOR = 0.01       # suggested by gptq paper on p6
+GPTQ_LAMBDA_FACTOR = 0.01       # suggested by gptq paper on p5
 CALIBRATION_TOKEN_LENGTH = 2048 # mostly model-dependent
+QUANTIZATION_BITS = 4
 
 # debug options; don't touch unless you know what you're doing
 CHECK_EIGS_JUST_TO_BE_SURE = False
 ONLY_FAKE_QUANTIZE = False
-QUANTIZATION_RANGE_MUST_INCLUDE_ZERO = True
 PERFORM_RTN_QUANTIZATION = False
+REALLY_LARGE_NUMBER = int(1e9)
 
 ################################################################################
 
@@ -67,24 +86,31 @@ if PERFORM_SPARSIFICATION and not PERFORM_QUANTIZATION:
     if not ONLY_FAKE_QUANTIZE:
         raise ValueError("Only fake quantization/sparsification supported.")
 
+if QUANTIZATION_BITS != 4 and not ONLY_FAKE_QUANTIZE:
+    raise ValueError("Non-4-bit kernels not supported currently.")
+
+if GROUP_QUANTIZATION_SIZE not in (-1, None) and PERFORM_RTN_QUANTIZATION:
+    raise ValueError("Group RTN not supported currently.")
+
+if PERFORM_RTN_QUANTIZATION and PERFORM_SPARSIFICATION:
+    # should probably impl mag sparsification at some point as a baseline
+    raise ValueError("Cannot perform sparsification with RTN quantization")
+
 ################################################################################
 
-def get_quantization_params(W):
-    mmin = W.min(axis=1).values
-    mmax = W.max(axis=1).values
+def _get_quantizer():
+    G_S = GROUP_QUANTIZATION_SIZE
 
-    if QUANTIZATION_RANGE_MUST_INCLUDE_ZERO:
-        # zero-point corresponds to the real value 0 when dequantized; the
-        # quantization range kinda needs to include 0 for this to be true
-        mmin = torch.minimum(mmin, torch.zeros_like(mmin))
-        mmax = torch.maximum(mmax, torch.zeros_like(mmax))
+    if (G_S == -1) or (G_S is None):
+        # to avoid special-casing logic, just set group size to an absurd number
+        G_S = int(1e9)
 
-    mscl = (mmax - mmin) / MAX_QUANTIZATION_VALUE
+    if QUANTIZATION_METHOD not in quantizers.methods:
+        raise ValueError("Invalid quantization method %r; choose one of %r"
+            % (QUANTIZATION_METHOD, quantizer.methods.keys()))
+    quantizer_method = quantizers.methods[QUANTIZATION_METHOD](QUANTIZATION_BITS, GROUP_QUANTIZATION_SIZE)
 
-    zeros = torch.round(-mmin/mscl)
-    scales = mscl
-
-    return zeros, scales
+    return quantizer_method
 
 
 def gptq_quantization(H, W, sparsify=False):
@@ -95,6 +121,23 @@ def gptq_quantization(H, W, sparsify=False):
     # (i.e. it's a (B_s//2):B_s sparsity structure)
     B_s = SPARSEGPT_BLOCK_SPARSITY
     lambda_factor = GPTQ_LAMBDA_FACTOR
+
+    quantizer_method = _get_quantizer()
+    G_S = quantizer_method.group_size
+
+    if (G_S == -1) or (G_S is None):
+        # to avoid special-casing logic, just set group size to some absurd
+        # number (i.e. treat no group quant as group quant w/ one group)
+        G_S = B * REALLY_LARGE_NUMBER
+
+    # technically not impossible, just a headache
+    assert (B <= G_S), "Group quantization chunk size cannot be smaller than quantization chunk size"
+    # see above
+    assert (G_S % B == 0), "Group quantization chunk size must be multiple of quantization chunk size"
+
+    if PERFORM_SPARSIFICATION:
+        assert G_S >= B_s, "Group quantization size must be greater than sparsity size"
+        assert (G_S % B_s == 0), "Group quantization size must be multiple of sparsity size"
 
     if PERFORM_QUANTIZATION and PERFORM_SPARSIFICATION:
         # we have kernel support currently so these sparsity checks matter
@@ -108,14 +151,68 @@ def gptq_quantization(H, W, sparsify=False):
 
     d_row, d_col = W.shape
 
-    zeros, scales = get_quantization_params(W)
+    zero_stack = []
+    scale_stack = []
 
     H *= 2 # H = 2XX^T+\lambdaI, not XX^T+\lambdaI
 
-    lambda_ = H.diagonal().mean(axis=0) * lambda_factor
     diag_idxes = list(range(H.shape[-1]))
 
-    # TODO: block-quantization option
+    if PERFORM_ACTIVATION_SORTING:
+        if (G_S >= REALLY_LARGE_NUMBER):
+            g_inc = 1
+        else:
+            g_inc = G_S
+
+        act_scores = H[diag_idxes, diag_idxes]
+        aN = len(act_scores)
+
+        # TODO: genericize this logic to N-level block sorting
+        if g_inc == 1:
+            if not sparsify:
+                ordering = torch.argsort(act_scores, descending=True)
+            else:
+                grped_act = act_scores.reshape(aN//B_s, B_s)
+                grp_scores = grped_act.sum(axis=1)
+                gp_ordering = torch.argsort(grp_scores, descending=True)
+
+                increment = gp_ordering * B_s
+
+                ordering = (grped_act.argsort(axis=-1, descending=True)[gp_ordering, ...] + increment[..., None]).flatten()
+        else:
+            # activation sorting swaps over the dimension we group-quantize
+            # *and* sparsify over; we need to go in multiple steps where we
+            # sort over smaller and smaller steps
+            if not sparsify:
+                grped_act = act_scores.reshape(aN//g_inc, g_inc)
+                grp_scores = grped_act.sum(axis=1)
+                gp_ordering = torch.argsort(grp_scores, descending=True)
+
+                increment = gp_ordering * g_inc
+
+                ordering = (grped_act.argsort(axis=-1, descending=True)[gp_ordering, ...] + increment[..., None]).flatten()
+            else:
+                grped_act = act_scores.reshape(aN//g_inc, g_inc//B_s, B_s)
+                grp_scores = grped_act.sum(axis=[1,2])
+                gp_ordering = torch.argsort(grp_scores, descending=True)
+
+                subgp_ordering = grped_act.sum(axis=2)[gp_ordering, ...].argsort(axis=-1, descending=True)
+
+                increment = (gp_ordering * g_inc)[:, None] + (subgp_ordering * B_s)
+                sub_increment = (gp_ordering * subgp_ordering.shape[-1])[:, None] + subgp_ordering
+
+                # perform sorting within each sparse block
+                sparse_ordering = grped_act.reshape(aN//B_s, B_s).argsort(axis=-1, descending=True)
+                # rearrange the sparse orderings into position then shape it back
+                sparse_ordering = sparse_ordering[sub_increment.reshape(aN//B_s, 1), :]
+                # properly shape it back and apply block-level offsets
+                ordering = sparse_ordering.reshape(grped_act.shape) + increment[..., None]
+                ordering = ordering.flatten()
+
+        W = W[:, ordering]
+        H = H[ordering][:, ordering]
+
+    lambda_ = H.diagonal().mean(axis=0) * lambda_factor
 
     attempts = 0
     while True:
@@ -158,21 +255,50 @@ def gptq_quantization(H, W, sparsify=False):
             E = E[:, :temp_b]
 
         for j in range(i, i+temp_b):
+            def _sparse_mask(s, e, pct):
+                slc = slice(s, e)
+                H_inv_d = torch.diagonal(H_inv[slc, slc])
+                scores = W[:, slc]**2 / H_inv_d**2
+
+                start_idx = int(scores.shape[1] * pct)
+
+                g_mask = torch.zeros_like(scores)
+                g_mask.scatter_(1, torch.argsort(scores)[:, start_idx:], 1)
+
+                return g_mask
+
             if sparsify:
                 if (j % B_s) == 0:
-                    H_inv_d = torch.diagonal(H_inv[j:(j+B_s), j:(j+B_s)])
-                    scores = W[:, j:(j+B_s)]**2 / H_inv_d**2
-
-                    g_mask = torch.zeros_like(scores)
-                    g_mask.scatter_(1, torch.argsort(scores)[:, (B_s // 2):], 1)
-
+                    g_mask = _sparse_mask(j, j+B_s, 0.5)
                     M[:, j:(j+B_s)] = g_mask.to(M.dtype)
                     assert((M[:, j:(j+B_s)].sum(axis=1) == (B_s // 2)).all())
 
                     del g_mask
 
-            W_q = fake_quantize(W[:, j], zeros, scales)
-            Q[:, j] = W_q
+            if (j % G_S) == 0:
+                if sparsify and B_s < G_S and GUESS_SPARSE_PERCENTAGE > 0.0:
+                    # make a guess at where the sparsified entires will be
+                    g_mask = _sparse_mask(j+B_s, j+G_S, GUESS_SPARSE_PERCENTAGE)
+                    sub_M = M[:, j:(j+G_S)]
+                    sub_M[:, B_s:] = g_mask
+                    del g_mask
+
+                    new_zeros, new_scales = quantizer_method.solve_params(
+                        W[:, j:(j+G_S)], sub_M)
+                    del sub_M
+                else:
+                    new_zeros, new_scales = quantizer_method.solve_params(
+                        W[:, j:(j+G_S)], M[:, j:(j+G_S)] if sparsify else None)
+
+                zero_stack.append(new_zeros)
+                scale_stack.append(new_scales)
+
+            W_q = quantizer_method.fake_quantize(
+                W[:, j][:, None],
+                M[:, j][:, None] if sparsify else None,
+                (zero_stack[-1], scale_stack[-1])
+            )
+            Q[:, j] = W_q[:, 0]
 
             if sparsify and PERFORM_QUANTIZATION:
                 if PERFORM_QUANTIZATION:
@@ -204,6 +330,21 @@ def gptq_quantization(H, W, sparsify=False):
     del H_inv
     del lambda_
 
+    zeros = torch.concat(zero_stack, axis=0)
+    scales = torch.concat(scale_stack, axis=0)
+
+    if PERFORM_ACTIVATION_SORTING:
+        reverse_ordering = torch.argsort(ordering)
+        Q = Q[:, reverse_ordering]
+        W = W[:, reverse_ordering]
+        if sparsify:
+            M = M[:, reverse_ordering]
+
+        if g_inc > 1:
+            reverse_gp_ordering = torch.argsort(gp_ordering)
+            zeros = zeros[reverse_gp_ordering, :]
+            scales = scales[reverse_gp_ordering, :]
+
     if sparsify and not PERFORM_QUANTIZATION:
         return W, zeros, scales, M
     elif sparsify and PERFORM_QUANTIZATION:
@@ -213,14 +354,15 @@ def gptq_quantization(H, W, sparsify=False):
 
 def rtn_quantization(H, W, sparsify=False):
     assert not sparsify
-    zeros, scales = get_quantization_params(W)
 
-    W = fake_quantize(W, zeros.unsqueeze(1), scales.unsqueeze(1))
+    quantizer_method = _get_quantizer()
+    zeros, scales = quantizer_method.solve_params(W, None)
+
+    W = quantizer_method.fake_quantize(W, None, (zeros, scales))
+
     return W, zeros, scales, None
 
 if PERFORM_RTN_QUANTIZATION:
-    if PERFORM_SPARSIFICATION:
-        raise ValueError("Cannot perform sparsification with RTN quantization")
     quantize_func = rtn_quantization
 else:
     quantize_func = gptq_quantization
@@ -231,12 +373,16 @@ else:
 def quantize_opt_layer(arg_stack, attn_mask, layer, layer_key, conv_model=None):
     layer.to("cuda:0")
 
-    def capture_layer_input(module):
+    class StopForwardPass(Exception):
+        pass
+
+    def capture_layer_input(module, label):
         original_fwd = module.forward
         output_container = [(None, 0)]
 
         def _capture(*args, **kwargs):
-            v = original_fwd(*args, **kwargs)
+            if label not in pending_capture_targets:
+                return original_fwd(*args, **kwargs)
 
             raw_tensor = args[0]
             if len(raw_tensor.shape) == 3:
@@ -268,6 +414,11 @@ def quantize_opt_layer(arg_stack, attn_mask, layer, layer_key, conv_model=None):
             del proc_tensor
 
             output_container[0] = (mean_tensor, n)
+
+            if PERFORM_STAGED_CALIBRATION:
+                raise StopForwardPass()
+
+            v = original_fwd(*args, **kwargs)
             return v
 
         module.forward = _capture
@@ -295,17 +446,25 @@ def quantize_opt_layer(arg_stack, attn_mask, layer, layer_key, conv_model=None):
             replacement_layer = layer
         else:
             if PERFORM_SPARSIFICATION:
-                replacement_layer = layers.Linear_SparseInt4(
-                    layer.in_features, layer.out_features, bias=conv_model.HAS_BIAS)
+                layer_class = layers.Linear_SparseInt4
             else:
-                replacement_layer = layers.Linear_Int4(
-                    layer.in_features, layer.out_features, bias=conv_model.HAS_BIAS)
+                layer_class = layers.Linear_Int4
 
-            replacement_layer.construct(zeros, scales, layer.bias, weights, mask)
+            replacement_layer = layer_class(
+                layer.in_features, layer.out_features,
+                quantization_bits=QUANTIZATION_BITS, group_size=GROUP_QUANTIZATION_SIZE,
+                bias=conv_model.HAS_BIAS)
+
+            quantizer_method = _get_quantizer()
+            n_weights, n_mask = quantizer_method.pack_weights(weights, mask, (zeros, scales))
+            replacement_layer.construct(zeros, scales, layer.bias, n_weights, n_mask)
 
             del layer.weight
             del layer.bias
             del layer
+            del n_weights
+            if n_mask is not None:
+                del n_mask
 
         if conv_model is not None:
             conv_model.write(
@@ -324,8 +483,8 @@ def quantize_opt_layer(arg_stack, attn_mask, layer, layer_key, conv_model=None):
 
         return replacement_layer
 
-
     quantization_targets = conv_model.QUANTIZATION_NODES
+    pending_capture_targets = set()
     module_accessors = {}
     leaf_targets = {}
 
@@ -339,33 +498,47 @@ def quantize_opt_layer(arg_stack, attn_mask, layer, layer_key, conv_model=None):
         module_accessors[target_identifier] = {
             "get" : lambda t=target, l=leaf_label: getattr(t, l),
             "set" : lambda x, t=target, l=leaf_label: setattr(t, l, x),
+            "label" : target_identifier,
         }
+        pending_capture_targets.add(target_identifier)
 
     capture_container = {}
     # set up data capture
     for module, acc in module_accessors.items():
-        capture_container[module] = capture_layer_input(acc["get"]())
+        capture_container[module] = capture_layer_input(acc["get"](), label=acc["label"])
 
-    print("Capturing calibration tensors")
-    for calib in arg_stack:
-        calib = calib.to("cuda:0")
-        irrelevant = layer.forward(calib, attention_mask=attn_mask)[0]
-        del irrelevant
+    while pending_capture_targets:
+        # perform forward pass on layer
+        print("Capturing calibration tensors")
+        for calib in arg_stack:
+            calib = calib.to("cuda:0")
+            try:
+                irrelevant = layer.forward(calib, attention_mask=attn_mask)[0]
+                del irrelevant
+            except StopForwardPass:
+                pass
 
-    print("Quantizing and replacing modules")
-    capture_container = {k:v[0][0] for k,v in capture_container.items()}
-    for module, acc in module_accessors.items():
-        new_layer = swap_out_layer(capture_container[module], module, acc["get"]()).to("cuda:0")
-        acc["set"](new_layer)
+        captured = {k:v[0][0] for k,v in capture_container.items() if v[0][0] is not None}
+        for module, calib_tensor in captured.items():
+            acc = module_accessors[module]
+
+            new_layer = swap_out_layer(calib_tensor, module, acc["get"]()).to("cuda:0")
+            acc["set"](new_layer)
+            pending_capture_targets.remove(module)
+            del capture_container[module]
 
     print("Recalculating calibration tensors")
     # run the whole thing back through the forward pass now to get
     # calibration values that take quantization into account
     final_states = []
-    for calib in arg_stack:
+    for i, calib in enumerate(arg_stack):
         calib = calib.to("cuda:0")
-        v = layer.forward(calib, attention_mask=attn_mask)
-        v = v[0].to("cpu")
+        v = layer.forward(calib, attention_mask=attn_mask)[0].contiguous()
+        v = v.clone().to("cpu")
+
+        if torch.isnan(v).any():
+            raise ValueError("Input tensor %d had nan element[s] on forward pass" % i)
+
         final_states.append(v)
 
     print("Cleaning up")

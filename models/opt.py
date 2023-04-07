@@ -74,19 +74,12 @@ class MemoryOPTModelWrapper(OPTModelWrapper):
 class ShardedOPTModelWrapper(OPTModelWrapper, SQShardedMixin):
     # loads in a sharded model one layer at a time, disposing after each layer
 
-    class FakeOPTConfig:
-        def __init__(self, dct):
-            super().__init__()
-            self._dct = dct
-        def __getattr__(self, k):
-            return self._dct[k]
-
     def __init__(self, fld):
         super().__init__(fld)
 
         self.setup_sharding()
 
-        self.fake_model_conf = ShardedOPTModelWrapper.FakeOPTConfig(self.model_conf)
+        self.fake_model_conf = transformers.OPTConfig(self.model_conf)
         self._pos_embedder = None
         self._token_embedder = None
 
