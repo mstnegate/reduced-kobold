@@ -23,8 +23,8 @@ class SQReducedOPTForCausalLM(transformers.OPTForCausalLM):
             # do nothing
             return
 
-        if quantization != 4:
-            raise ValueError("Only 4-bit quantization supported currently")
+        if quantization not in (4, 3, 2):
+            raise ValueError("%d-bit quantization not supported" % quantization)
 
         group_size = getattr(config, "quantization_group_size", -1)
 

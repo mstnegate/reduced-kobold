@@ -4,10 +4,6 @@ This repo contains an implementation of GPTQ[^1] + SparseGPT[^2] with some [hack
 
 Note that I am neither associated with these papers nor their authors.
 
-The code supports int4 quantization via GPTQ, with optional 16:32 joint sparsification. Group quantization is supported.
-
-Note that sparsification is currently experimental. Benchmark results loosely follow the paper's claims but actual generation can be tempermental. I haven't ran these enough to comment on output quality relative to lower param count dense models. Hopefully my code is just bugged!
-
 ## Supported Models/Configurations
 
 Supported models:
@@ -17,7 +13,11 @@ Supported models:
 
 Support for other base models is planned.
 
-This repo only contains [accelerated] support for GPTQ int4 and GPTQ int4 + 16:32 sparsified models. This should provide 4-bit and 3-effective-bit weights for [most] of the model.
+The following configurations are supported for [accelerated] inferencing:
+* GPTQ 4-bit (with optional 16:32 structured sparsity)
+* GPTQ 3-bit (dense only)
+
+Group quantization is supported for all configurations.
 
 ## Benchmarks
 
@@ -42,6 +42,7 @@ You will need to perform these steps under whichever Python env you run your stu
     2. Use a pre-quantized model:
         - LLaMA models pre-quantized with [qwopqwop200's excellent GPTQ repo](https://github.com/qwopqwop200/GPTQ-for-LLaMa) are incompatible without slight manual work due to some bad naming decisions on my part. These include the decapoda-research ones. There is a compatibility layer, but you need to some setup:
             - YMMV with this method; I didn't prepare those weights.
+            - Note that this code path isn't actively tested and does not support all features of that repo.
             - Create a folder with appropriate config files (config.json, generation_config.json, etc., etc.)
             - Copy the quantized weights file (probably `something.pt`) into this folder and rename it to `pytorch_model.bin`.
             - Modify config.json following the steps above. Do not set `"is_sparse"`. Add the additional key-value pair: `"qwopqwop_mode" : true`

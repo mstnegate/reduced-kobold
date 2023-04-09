@@ -19,6 +19,7 @@ class Linear_Int4(torch.nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.group_size = group_size
+        self.quantization_bits = quantization_bits
 
         # register as buffers to try and avoid baggage with weight updates
         # and autograd; no plans currently to try and support quantized training
@@ -85,8 +86,8 @@ class Linear_Int4(torch.nn.Module):
         with torch.no_grad():
             outs = torch.zeros(shape, dtype=x.dtype, device=x.device)
 
-            int4matmul.quant_int4_linear_mult(
-                outs, getattr(self, self.WEIGHT_KEY),
+            int4matmul.quant_matmul(
+                self.quantization_bits, outs, getattr(self, self.WEIGHT_KEY),
                 x if len(x.shape) == 3 else x.view(1, *x.shape),
                 self.scales if self._n_groups > 1 else self.scales[None, :],
                 self.zeros if self._n_groups > 1 else self.zeros[None, :],

@@ -14,6 +14,7 @@ import models
 # general config stuff
 
 # stuff you will probably want to change
+QUANTIZATION_BITS = 3
 PERFORM_QUANTIZATION = True
 PERFORM_SPARSIFICATION = True
 GROUP_QUANTIZATION_SIZE = 128 # disable with -1 or None (either works)
@@ -68,7 +69,6 @@ GPTQ_BLOCK_SIZE = 128           # suggested by gptq paper on p5
 SPARSEGPT_BLOCK_SPARSITY = 32   # keep at 32 unless benchmarking fp16 sparse
 GPTQ_LAMBDA_FACTOR = 0.01       # suggested by gptq paper on p5
 CALIBRATION_TOKEN_LENGTH = 2048 # mostly model-dependent
-QUANTIZATION_BITS = 4
 
 # debug options; don't touch unless you know what you're doing
 CHECK_EIGS_JUST_TO_BE_SURE = False
@@ -86,8 +86,9 @@ if PERFORM_SPARSIFICATION and not PERFORM_QUANTIZATION:
     if not ONLY_FAKE_QUANTIZE:
         raise ValueError("Only fake quantization/sparsification supported.")
 
-if QUANTIZATION_BITS != 4 and not ONLY_FAKE_QUANTIZE:
-    raise ValueError("Non-4-bit kernels not supported currently.")
+# 2-bit technically supported but so niche i don't want to support it
+if QUANTIZATION_BITS not in (4, 3) and not ONLY_FAKE_QUANTIZE:
+    raise ValueError("Only 3-bit and 4-bit quantization supported currently.")
 
 if GROUP_QUANTIZATION_SIZE not in (-1, None) and PERFORM_RTN_QUANTIZATION:
     raise ValueError("Group RTN not supported currently.")
