@@ -10,32 +10,37 @@ def _translate_gs(group_size):
         return int(1e9)
     return group_size
 
-# TODO: resolve device stuff
-def _pack_dense_int4(weights, wt_out=None, mask_out=None):
+def _pack_dense_int_pow2(bits, weights, wt_out=None, mask_out=None):
     weights = weights.T.contiguous().to(torch.int)
+    weights_per_int = 32 // bits
 
     if wt_out is None:
         wt_out = torch.zeros(
-            (weights.shape[0] // 8, weights.shape[1]),
+            (weights.shape[0] // weights_per_int, weights.shape[1]),
             dtype=torch.int,
             device=weights.device
         )
 
-    for i in range(0, weights.shape[0], 8):
-        write_idx = i // 8
+    for i in range(0, weights.shape[0], weights_per_int):
+        write_idx = i // weights_per_int
 
         v = weights[i, :].clone()
-        v |= weights[i+1, :] << 4
-        v |= weights[i+2, :] << 8
-        v |= weights[i+3, :] << 12
-        v |= weights[i+4, :] << 16
-        v |= weights[i+5, :] << 20
-        v |= weights[i+6, :] << 24
-        v |= weights[i+7, :] << 28
+        for j in range(bits, 32, bits):
+            v |= weights[i+(j // bits), :] << j
 
         wt_out.data[write_idx, :] = v
 
     return wt_out, mask_out
+
+# TODO: resolve device stuff
+def _pack_dense_int4(weights, wt_out=None, mask_out=None):
+    return _pack_dense_int_pow2(4, weights, wt_out, mask_out)
+
+def _pack_dense_int2(weights, wt_out=None, mask_out=None):
+    return _pack_dense_int_pow2(2, weights, wt_out, mask_out)
+
+def _pack_dense_int1(weights, wt_out=None, mask_out=None):
+    return _pack_dense_int_pow2(1, weights, wt_out, mask_out)
 
 def _pack_sparse_int4(weights, mask, wt_out=None, mask_out=None):
     if wt_out is None:
@@ -58,12 +63,70 @@ def _pack_sparse_int4(weights, mask, wt_out=None, mask_out=None):
 
     return wt_out, mask_out
 
+def _pack_dense_int3(weights, wt_out=None, mask_out=None):
+    assert(weights.shape[0] % 64 == 0)
+
+    weights = weights.T.contiguous().to(torch.int)
+
+    if wt_out is None:
+        wt_out = torch.zeros(
+            ((weights.shape[0] * 3) // 32, weights.shape[1]),
+            dtype=torch.int,
+            device=weights.device
+        )
+
+    for i in range(0, weights.shape[0], 32):
+        write_idx = (i * 3) // 32
+
+        acc = []
+        j = i
+        bits_to_write = 32*3
+        bits_left = 0
+        while bits_to_write > 0:
+            active = weights[j, :]
+            bits_read = 3
+
+            while bits_read > 0:
+                if bits_left <= 0:
+                    acc.append(torch.zeros_like(weights[j, :]))
+                    bits_left = 32
+
+                bits_to_read = min(bits_read, bits_left, bits_to_write)
+
+                acc[-1] |= (active & ((1 << bits_to_read) - 1)) << (32 - bits_left)
+                active >>= bits_to_read
+                bits_read -= bits_to_read
+                bits_to_write -= bits_to_read
+                bits_left -= bits_to_read
+
+            j += 1
+
+        for j, buf in enumerate(acc):
+            wt_out.data[write_idx+j, :] = buf
+
+    return wt_out, mask_out
+
 def pack_weights(weights, mask, bits, wt_out=None, mask_out=None):
     if (bits == 4):
         if mask is not None:
             return _pack_sparse_int4(weights, mask, wt_out, mask_out)
         else:
             return _pack_dense_int4(weights, wt_out, mask_out)
+    elif (bits == 3):
+        if mask is not None:
+            raise NotImplementedError
+
+        return _pack_dense_int3(weights, wt_out, mask_out)
+    elif (bits == 2):
+        if mask is not None:
+            raise NotImplementedError
+
+        return _pack_dense_int2(weights, wt_out, mask_out)
+    elif (bits == 1):
+        if mask is not None:
+            raise NotImplementedError
+
+        return _pack_dense_int1(weights, wt_out, mask_out)
     else:
         raise ValueError("Unknown weight packing arguments")
 
