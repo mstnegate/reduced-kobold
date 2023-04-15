@@ -40,7 +40,7 @@ class OPTModelWrapper(SQBaseModelWrapper):
             None, attn_mask, (batch_size, tokens.shape[1]), token_embeds, 0
         )
 
-        return token_embeds + pos_embeds, attn_mask.to("cuda:0")
+        return token_embeds + pos_embeds, dict(attention_mask=attn_mask.to("cuda:0"))
 
 
 class MemoryOPTModelWrapper(OPTModelWrapper):

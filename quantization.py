@@ -14,10 +14,10 @@ import models
 # general config stuff
 
 # stuff you will probably want to change
-QUANTIZATION_BITS = 3
+QUANTIZATION_BITS = 4
 PERFORM_QUANTIZATION = True
 PERFORM_SPARSIFICATION = True
-GROUP_QUANTIZATION_SIZE = 128 # disable with -1 or None (either works)
+GROUP_QUANTIZATION_SIZE = -1 # disable with -1 or None (either works)
 QUANTIZATION_METHOD = "zero-point" # see quantizers.py for options
 
 LOAD_FILE_PATH = "/pth/to/your/model/folder"
@@ -371,7 +371,7 @@ else:
 ################################################################################
 
 # TODO: remove cuda:0 assumption
-def quantize_opt_layer(arg_stack, attn_mask, layer, layer_key, conv_model=None):
+def quantize_opt_layer(arg_stack, gen_kwargs, layer, layer_key, conv_model=None):
     layer.to("cuda:0")
 
     class StopForwardPass(Exception):
@@ -514,7 +514,7 @@ def quantize_opt_layer(arg_stack, attn_mask, layer, layer_key, conv_model=None):
         for calib in arg_stack:
             calib = calib.to("cuda:0")
             try:
-                irrelevant = layer.forward(calib, attention_mask=attn_mask)[0]
+                irrelevant = layer.forward(calib, **gen_kwargs)[0]
                 del irrelevant
             except StopForwardPass:
                 pass
@@ -534,7 +534,7 @@ def quantize_opt_layer(arg_stack, attn_mask, layer, layer_key, conv_model=None):
     final_states = []
     for i, calib in enumerate(arg_stack):
         calib = calib.to("cuda:0")
-        v = layer.forward(calib, attention_mask=attn_mask)[0].contiguous()
+        v = layer.forward(calib, **gen_kwargs)[0].contiguous()
         v = v.clone().to("cpu")
 
         if torch.isnan(v).any():
@@ -607,11 +607,11 @@ def prepare_calibration_data(fsettings, n_samples, conv_model):
 
     arg_stack = []
     for i in range(0, n_samples, CALIBRATION_BATCH_SIZE):
-        val, mask = conv_model.embed(iten[i:(i+CALIBRATION_BATCH_SIZE), ...], batch_size=CALIBRATION_BATCH_SIZE)
+        val, gen_kwargs = conv_model.embed(iten[i:(i+CALIBRATION_BATCH_SIZE), ...], batch_size=CALIBRATION_BATCH_SIZE)
 
         arg_stack.append(val)
 
-    return arg_stack, mask.to("cuda:0")
+    return arg_stack, gen_kwargs
 
 ################################################################################
 
@@ -626,7 +626,7 @@ if __name__ == "__main__":
 
     conv_model = models.get_loader(MODEL_TYPE, LOAD_MODEL_IS_SHARDED)(LOAD_FILE_PATH)
 
-    arg_stack, attn_mask = prepare_calibration_data(
+    arg_stack, gen_kwargs = prepare_calibration_data(
         CALIBRATION_DATA_SETTINGS,
         N_SAMPLES,
         conv_model=conv_model
@@ -637,7 +637,7 @@ if __name__ == "__main__":
     for i,layer in enumerate(conv_model.decoder_layers()):
         print("Running on layer %d" % i)
         with torch.no_grad():
-            new_states = quantize_opt_layer(states, attn_mask, layer, i, conv_model=conv_model)
+            new_states = quantize_opt_layer(states, gen_kwargs, layer, i, conv_model=conv_model)
 
         # clear memory very very thoroughly; any sort of leak = bad
         for a in states:

@@ -37,8 +37,13 @@ class LlamaModelWrapper(SQBaseModelWrapper):
         attn_mask = LlamaModel._prepare_decoder_attention_mask(
             None, attn_mask, (batch_size, tokens.shape[1]), token_embeds, 0
         )
+        seq_len = token_embeds.shape[1]
+        pos_ids = torch.arange(0, seq_len, dtype=torch.long, device=token_embeds.device).unsqueeze(0)
 
-        return token_embeds, attn_mask.to("cuda:0")
+        return token_embeds, dict(
+            attention_mask=attn_mask.to("cuda:0"),
+            position_ids=pos_ids.to("cuda:0"),
+        )
 
 class MemoryLlamaModelWrapper(LlamaModelWrapper):
     def __init__(self, fld):
@@ -60,6 +65,9 @@ class ShardedLlamaModelWrapper(LlamaModelWrapper, SQShardedMixin):
         self.setup_sharding()
 
         self.fake_model_conf = ShardedLlamaModelWrapper.FakeLlamaConfig(self.model_conf)
+        if "max_position_embeddings" not in self.fake_model_conf._dct:
+            self.fake_model_conf._dct["max_position_embeddings"] = self.fake_model_conf.max_sequence_length
+
         self._token_embedder = None
 
     def load_embedder(self):

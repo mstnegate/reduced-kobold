@@ -14,8 +14,9 @@ Supported models:
 Support for other base models is planned.
 
 The following configurations are supported for [accelerated] inferencing:
-* GPTQ 4-bit (with optional 16:32 semi-structured sparsity)
-* GPTQ 3-bit (dense only)
+* GPTQ 4-bit dense (4-bit)
+* GPTQ 4-bit with 16:32 sparsity (3-bit)
+* GPTQ 3-bit dense (3-bit)
 
 Group quantization is supported for all configurations.
 

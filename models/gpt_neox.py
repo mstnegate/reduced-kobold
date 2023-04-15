@@ -22,10 +22,13 @@ class GPTNeoXModelWrapper(SQBaseModelWrapper):
         if self._token_embedder is None:
             self.load_embedder()
 
-        attn_mask = torch.zeros_like(tokens)[:, None, None, :]
+        attn_mask = torch.zeros_like(tokens)[:, None, None, :].to("cuda:0")
         self._token_embedder.to(tokens.device)
 
-        return self._token_embedder(tokens), attn_mask
+        seq_len = tokens.shape[1]
+        pos_ids = torch.arange(0, seq_len, dtype=torch.long, device=tokens.device).unsqueeze(0)
+
+        return self._token_embedder(tokens), dict(attention_mask=attn_mask, position_ids=pos_ids.to("cuda:0"))
 
 
 class MemoryGPTNeoXModelWrapper(GPTNeoXModelWrapper):
